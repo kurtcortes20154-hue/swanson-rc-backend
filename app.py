@@ -5,21 +5,91 @@ from openpyxl.drawing.image import Image as XLImage
 from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, AnchorMarker
 from openpyxl.styles import Alignment
 from PIL import Image as PILImage
-import io, base64, os, json
+import io, base64, os, json, smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
 CORS(app)
 
 TEMPLATE = os.path.join(os.path.dirname(__file__), 'AVISO_DE_RECEPCION_.xlsx')
 
-# Slots: (key, from_col, from_row, to_col, to_row) — índices 0-based
+# Correo — configurar via variables de entorno en Render
+SMTP_HOST     = os.environ.get('SMTP_HOST', 'smtp.gmail.com')
+SMTP_PORT     = int(os.environ.get('SMTP_PORT', 587))
+SMTP_USER     = os.environ.get('SMTP_USER', '')   # tu correo Gmail
+SMTP_PASS     = os.environ.get('SMTP_PASS', '')   # contraseña de aplicación Gmail
+CORREO_DEST   = 'kurtcortes20154@gmail.com'
+
+def enviar_aviso(rec):
+    """Envía correo de aviso de recepción. Falla silenciosamente si no hay credenciales."""
+    if not SMTP_USER or not SMTP_PASS:
+        return
+    try:
+        tipo   = rec.get('tipo', '')
+        modelo = rec.get('modelo', '')
+        marca  = rec.get('marca', '')
+        codigo = rec.get('codigo', '')
+        cliente= rec.get('cliente', '')
+        guia   = rec.get('guia', '')
+        receptor = rec.get('receptor', '')
+
+        componente_str = ' '.join(filter(None, [tipo, modelo, marca]))
+
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = 'AVISO DE RECEPCIÓN'
+        msg['From']    = SMTP_USER
+        msg['To']      = CORREO_DEST
+
+        texto = (
+            f"AVISO DE RECEPCIÓN — Swanson Industries\n\n"
+            f"Se han recepcionado los siguientes componentes:\n\n"
+            f"{componente_str} - {codigo}\n\n"
+            f"Cliente:          {cliente}\n"
+            f"Guía despacho:    {guia}\n"
+            f"Recepcionado por: {receptor}\n\n"
+            f"Ingrese al sistema para asignar la OT correspondiente."
+        )
+        html = f"""
+        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+          <div style="background:#1F3864;padding:20px;text-align:center">
+            <h2 style="color:#fff;margin:0">AVISO DE RECEPCIÓN</h2>
+            <p style="color:#a8c4e0;margin:4px 0 0">Swanson Industries</p>
+          </div>
+          <div style="padding:24px;background:#f4f5f7">
+            <p style="font-size:15px;color:#444">Se han recepcionado los siguientes componentes:</p>
+            <div style="background:#fff;border-left:4px solid #1F3864;padding:16px;margin:16px 0;border-radius:4px">
+              <p style="font-size:16px;font-weight:bold;color:#1F3864;margin:0">{componente_str}</p>
+              <p style="font-family:monospace;font-size:14px;color:#2E75B6;margin:6px 0 0">{codigo}</p>
+            </div>
+            <table style="width:100%;font-size:13px;color:#555">
+              <tr><td style="padding:4px 0"><b>Cliente:</b></td><td>{cliente}</td></tr>
+              <tr><td style="padding:4px 0"><b>Guía despacho:</b></td><td>{guia}</td></tr>
+              <tr><td style="padding:4px 0"><b>Recepcionado por:</b></td><td>{receptor}</td></tr>
+            </table>
+            <div style="margin-top:20px;padding:12px;background:#E8EDF5;border-radius:4px;font-size:12px;color:#666">
+              Ingrese al sistema de Recepción de Componentes para asignar la OT correspondiente.
+            </div>
+          </div>
+        </div>"""
+
+        msg.attach(MIMEText(texto, 'plain'))
+        msg.attach(MIMEText(html, 'html'))
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_USER, CORREO_DEST, msg.as_string())
+    except Exception as e:
+        print(f"[EMAIL ERROR] {e}")  # log pero no interrumpe el flujo
+
+# ── FOTO SLOTS ────────────────────────────────────────────────────────────
 PHOTO_SLOTS_REG = [
-    ('recepcion',      2,  54, 10, 62),   # C55:J62
-    ('alimentaciones', 12, 54, 20, 62),   # M55:T62
-    ('anclajes',       2,  63, 10, 71),   # C64:J71
-    ('accesorios',     12, 63, 20, 71),   # M64:T71
+    ('recepcion',      2,  54, 10, 62),
+    ('alimentaciones', 12, 54, 20, 62),
+    ('anclajes',       2,  63, 10, 71),
+    ('accesorios',     12, 63, 20, 71),
 ]
-GUIA_SLOT = ('guia_recepcion', 1, 26, 21, 52)  # B27:U52
 
 def _insert_image(ws, img_data, from_col, from_row, to_col, to_row):
     if isinstance(img_data, str):
@@ -35,7 +105,7 @@ def _insert_image(ws, img_data, from_col, from_row, to_col, to_row):
     img.anchor = TwoCellAnchor(
         editAs='twoCell',
         _from=AnchorMarker(col=from_col, row=from_row, colOff=0, rowOff=0),
-        to=AnchorMarker(col=to_col,   row=to_row,   colOff=0, rowOff=0)
+        to=AnchorMarker(col=to_col, row=to_row, colOff=0, rowOff=0)
     )
     ws.add_image(img)
 
@@ -77,9 +147,8 @@ def build_fsgi249(rec, photos):
         oc = ws[f'O{row}']
         if type(oc).__name__ != 'MergedCell': oc.value = ck.get(f'obs_{key}','')
 
-    # Guía Y/O Factura: foto o texto
     if photos.get('guia_recepcion'):
-        _insert_image(ws, photos['guia_recepcion'], 1, 26, 21, 52)  # B27:U52
+        _insert_image(ws, photos['guia_recepcion'], 1, 26, 21, 52)
     else:
         lineas = [f"Transportista: {rec.get('transp','—')}     Bultos: {rec.get('bultos','1')}     Código: {rec.get('codigo','')}"]
         if rec.get('acc'):      lineas.append(f"Accesorios: {rec['acc']}")
@@ -88,7 +157,6 @@ def build_fsgi249(rec, photos):
         ws['B27'].value = '\n'.join(lineas)
         ws['B27'].alignment = Alignment(wrap_text=True, vertical='top', horizontal='left')
 
-    # Registro fotográfico — todas las fotos con TwoCellAnchor
     for key, fc, fr, tc, tr in PHOTO_SLOTS_REG:
         if photos.get(key):
             _insert_image(ws, photos[key], fc, fr, tc, tr)
@@ -114,6 +182,8 @@ def generar():
             f = request.files.get(k)
             if f: photos[k] = f.read()
         xlsx = build_fsgi249(rec, photos)
+        # Enviar correo en background (no bloquea la respuesta)
+        enviar_aviso(rec)
         codigo  = rec.get('codigo','RC')
         cliente = rec.get('cliente','').replace(' ','_')
         return send_file(xlsx,
