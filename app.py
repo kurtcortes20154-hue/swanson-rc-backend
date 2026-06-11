@@ -85,10 +85,13 @@ def enviar_aviso(rec):
 
 # ── FOTO SLOTS ────────────────────────────────────────────────────────────
 PHOTO_SLOTS_REG = [
-    ('recepcion',      2,  54, 10, 62),
-    ('alimentaciones', 12, 54, 20, 62),
-    ('anclajes',       2,  63, 10, 71),
-    ('accesorios',     12, 63, 20, 71),
+    ('recepcion',        2,  54, 10, 62),   # C55:J62
+    ('anclaje_vastago',  12, 54, 20, 62),   # M55:T62
+    ('anclaje_botella',  2,  63, 10, 71),   # C64:J71
+    ('alimentaciones',   12, 63, 20, 71),   # M64:T71
+    ('color_componente', 2,  72, 10, 80),   # C73:J80
+    ('id_cliente',       12, 72, 20, 80),   # M73:T80
+    ('danos_visibles',   2,  81, 10, 89),   # C82:J89
 ]
 
 def _insert_image(ws, img_data, from_col, from_row, to_col, to_row):
@@ -178,7 +181,7 @@ def generar():
     try:
         rec = json.loads(request.form.get('rec','{}'))
         photos = {}
-        for k in ['recepcion','alimentaciones','anclajes','guia_recepcion','accesorios']:
+        for k in ['recepcion','anclaje_vastago','anclaje_botella','alimentaciones','guia_recepcion','color_componente','id_cliente','danos_visibles']:
             f = request.files.get(k)
             if f: photos[k] = f.read()
         xlsx = build_fsgi249(rec, photos)
