@@ -150,6 +150,12 @@ def build_fsgi249(rec, photos):
         oc = ws[f'O{row}']
         if type(oc).__name__ != 'MergedCell': oc.value = ck.get(f'obs_{key}','')
 
+    # Ítem 4 — añadir el color del componente al costado del detalle de zuncho
+    color = (rec.get('color') or '').strip()
+    if color:
+        base24 = str(ws['C24'].value or 'TIPO DE ELEMENTO: ZUNCHO METALICO').rstrip()
+        ws['C24'].value = f"{base24}     Color: {color}"
+
     if photos.get('guia_recepcion'):
         _insert_image(ws, photos['guia_recepcion'], 1, 26, 21, 52)
     else:
