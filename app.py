@@ -2,8 +2,11 @@ from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
-from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, AnchorMarker
-from openpyxl.styles import Alignment
+from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, OneCellAnchor, AnchorMarker
+from openpyxl.drawing.xdr import XDRPositiveSize2D
+from openpyxl.utils.units import pixels_to_EMU
+from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.styles import Alignment, Font
 from PIL import Image as PILImage
 import io, base64, os, json, smtplib
 from email.mime.text import MIMEText
@@ -85,13 +88,14 @@ def enviar_aviso(rec):
 
 # ── FOTO SLOTS ────────────────────────────────────────────────────────────
 PHOTO_SLOTS_REG = [
-    ('recepcion',        2,  54, 10, 62),   # C55:J62
-    ('anclaje_vastago',  12, 54, 20, 62),   # M55:T62
-    ('anclaje_botella',  2,  63, 10, 71),   # C64:J71
-    ('alimentaciones',   12, 63, 20, 71),   # M64:T71
-    ('color_componente', 2,  72, 10, 80),   # C73:J80
-    ('id_cliente',       12, 72, 20, 80),   # M73:T80
-    ('danos_visibles',   2,  81, 10, 89),   # C82:J89
+    # 'recepcion' se reubicó como 'Foto General' al INICIO del documento (filas 5-6).
+    # Las 6 fotos restantes llenan la grilla de arriba hacia abajo (sin huecos).
+    ('anclaje_vastago',  2,  54, 10, 62),   # C55:J62
+    ('anclaje_botella',  12, 54, 20, 62),   # M55:T62
+    ('alimentaciones',   2,  63, 10, 71),   # C64:J71
+    ('color_componente', 12, 63, 20, 71),   # M64:T71
+    ('id_cliente',       2,  72, 10, 80),   # C73:J80
+    ('danos_visibles',   12, 72, 20, 80),   # M73:T80
 ]
 
 def _insert_image(ws, img_data, from_col, from_row, to_col, to_row):
@@ -112,6 +116,41 @@ def _insert_image(ws, img_data, from_col, from_row, to_col, to_row):
     )
     ws.add_image(img)
 
+def _col_width_px(ws, letter):
+    w = ws.column_dimensions[letter].width or 8.43
+    return int(round(w * 7 + 5))
+
+def _cols_px(ws, c1, c2):
+    return sum(_col_width_px(ws, get_column_letter(i))
+               for i in range(column_index_from_string(c1), column_index_from_string(c2) + 1))
+
+def _insert_image_fit(ws, img_data, from_col, from_row, box_w_px, box_h_px, quality=95):
+    """Inserta una imagen CENTRADA dentro de un recuadro (box_w_px × box_h_px), a partir de la
+    celda 0-indexed (from_col, from_row), PRESERVANDO la proporción original (sin deformar).
+    Mantiene alta calidad (JPEG q=95)."""
+    if isinstance(img_data, str):
+        if ',' in img_data: img_data = img_data.split(',')[1]
+        img_bytes = base64.b64decode(img_data)
+    else:
+        img_bytes = img_data
+    pil = PILImage.open(io.BytesIO(img_bytes)).convert('RGB')
+    w, h = pil.size
+    buf = io.BytesIO()
+    pil.save(buf, format='JPEG', quality=quality)
+    buf.seek(0)
+    img = XLImage(buf)
+    scale = min(box_w_px / w, box_h_px / h)            # mismo factor en ambos ejes = sin deformar
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    off_x = int((box_w_px - new_w) / 2)                # centrado horizontal
+    off_y = int((box_h_px - new_h) / 2)                # centrado vertical
+    img.anchor = OneCellAnchor(
+        _from=AnchorMarker(col=from_col, colOff=pixels_to_EMU(off_x),
+                           row=from_row, rowOff=pixels_to_EMU(off_y)),
+        ext=XDRPositiveSize2D(pixels_to_EMU(new_w), pixels_to_EMU(new_h))
+    )
+    ws.add_image(img)
+
 def build_fsgi249(rec, photos):
     wb = load_workbook(TEMPLATE)
     ws = wb.active
@@ -124,6 +163,20 @@ def build_fsgi249(rec, photos):
     ws['U2'].value = 'FSGI-249'
     ws['U3'].value = f"Revisión: 3  ·  {rec.get('codigo','')}"
     ws['U4'].value = f"Fecha: {rec.get('fecha','')}"
+
+    # ── FOTO GENERAL — imagen principal del componente, al INICIO del documento:
+    #    debajo del encabezado (filas 1-4) y antes de los datos del componente (fila 7+).
+    #    Se usa la zona libre de las filas 5-6 (NO se insertan filas, así no se desplazan
+    #    las referencias de celda existentes). Imagen centrada y sin deformar.
+    if photos.get('foto_general'):
+        ws['B5'].value = 'FOTO GENERAL'
+        ws['B5'].font = Font(bold=True, size=11)
+        ws.row_dimensions[5].height = 18      # fila etiqueta
+        ws.row_dimensions[6].height = 225     # fila imagen (~300 px)
+        box_w = _cols_px(ws, 'C', 'T')        # ancho disponible C..T
+        box_h = int(round(225 * 96 / 72))     # alto fila 6 en px
+        _insert_image_fit(ws, photos['foto_general'], 2, 5, box_w, box_h)  # col C(2), fila 6(idx5)
+
     w('D7',  rec.get('cliente',''))
     w('Q7',  f"{rec.get('fecha','')}  {rec.get('hora','')}")
     w('D8',  rec.get('oc','') or '')
@@ -150,11 +203,18 @@ def build_fsgi249(rec, photos):
         oc = ws[f'O{row}']
         if type(oc).__name__ != 'MergedCell': oc.value = ck.get(f'obs_{key}','')
 
-    # Ítem 4 — añadir el color del componente al costado del detalle de zuncho
-    color = (rec.get('color') or '').strip()
+    # Ítem 4 — al costado derecho del detalle de zuncho (misma fila C24, sin combinar celdas):
+    # color del componente y, a su derecha, color de base de traslado.
+    # Ej.: "TIPO DE ELEMENTO: ZUNCHO METALICO     Color: Amarillo CAT     Color Base: Negro"
+    color      = (rec.get('color') or '').strip()
+    color_base = (rec.get('color_base') or '').strip()
+    base24 = str(ws['C24'].value or 'TIPO DE ELEMENTO: ZUNCHO METALICO').rstrip()
     if color:
-        base24 = str(ws['C24'].value or 'TIPO DE ELEMENTO: ZUNCHO METALICO').rstrip()
-        ws['C24'].value = f"{base24}     Color: {color}"
+        base24 = f"{base24}     Color: {color}"
+    if color_base:
+        base24 = f"{base24}     Color Base: {color_base}"
+    if color or color_base:
+        ws['C24'].value = base24
 
     if photos.get('guia_recepcion'):
         _insert_image(ws, photos['guia_recepcion'], 1, 26, 21, 52)
@@ -187,7 +247,7 @@ def generar():
     try:
         rec = json.loads(request.form.get('rec','{}'))
         photos = {}
-        for k in ['recepcion','anclaje_vastago','anclaje_botella','alimentaciones','guia_recepcion','color_componente','id_cliente','danos_visibles']:
+        for k in ['foto_general','anclaje_vastago','anclaje_botella','alimentaciones','guia_recepcion','color_componente','id_cliente','danos_visibles']:
             f = request.files.get(k)
             if f: photos[k] = f.read()
         xlsx = build_fsgi249(rec, photos)
