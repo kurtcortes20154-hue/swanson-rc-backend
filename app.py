@@ -2,11 +2,8 @@ from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
-from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, OneCellAnchor, AnchorMarker
-from openpyxl.drawing.xdr import XDRPositiveSize2D
-from openpyxl.utils.units import pixels_to_EMU
-from openpyxl.utils import get_column_letter, column_index_from_string
-from openpyxl.styles import Alignment, Font
+from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, AnchorMarker
+from openpyxl.styles import Alignment
 from PIL import Image as PILImage
 import io, base64, os, json, smtplib
 from email.mime.text import MIMEText
@@ -87,18 +84,27 @@ def enviar_aviso(rec):
         print(f"[EMAIL ERROR] {e}")  # log pero no interrumpe el flujo
 
 # ── FOTO SLOTS ────────────────────────────────────────────────────────────
+# Mapeo foto → recuadro EXISTENTE de la plantilla AVISO_DE_RECEPCION (coords 0-indexed del
+# ancla). El orden y la posición coinciden EXACTAMENTE con las etiquetas/recuadros de la plantilla:
+#   C55:J62 "FOTO GENERAL"  · M55:T62 "FOTO ANCLAJE VASTAGO" · C64:J71 "FOTO ANCLAJE BOTELLA"
+#   M64:T71 "FOTO DE ALIMENTACIONES" · C73:J80 "FOTO COLOR DE COMPONENTE"
+#   M73:T80 "FOTO IDENTIFICACION DE CLIENTE" · C82:J89 "FOTO DAÑOS VISIBLES (OPCIONAL)"
+# No se reasignan, mueven ni reordenan: cada llave va a su recuadro definido en la plantilla.
 PHOTO_SLOTS_REG = [
-    # 'recepcion' se reubicó como 'Foto General' al INICIO del documento (filas 5-6).
-    # Las 6 fotos restantes llenan la grilla de arriba hacia abajo (sin huecos).
-    ('anclaje_vastago',  2,  54, 10, 62),   # C55:J62
-    ('anclaje_botella',  12, 54, 20, 62),   # M55:T62
-    ('alimentaciones',   2,  63, 10, 71),   # C64:J71
-    ('color_componente', 12, 63, 20, 71),   # M64:T71
-    ('id_cliente',       2,  72, 10, 80),   # C73:J80
-    ('danos_visibles',   12, 72, 20, 80),   # M73:T80
+    ('foto_general',     2,  54, 10, 62),   # C55:J62
+    ('anclaje_vastago',  12, 54, 20, 62),   # M55:T62
+    ('anclaje_botella',  2,  63, 10, 71),   # C64:J71
+    ('alimentaciones',   12, 63, 20, 71),   # M64:T71
+    ('color_componente', 2,  72, 10, 80),   # C73:J80
+    ('id_cliente',       12, 72, 20, 80),   # M73:T80
+    ('danos_visibles',   2,  81, 10, 89),   # C82:J89
 ]
 
 def _insert_image(ws, img_data, from_col, from_row, to_col, to_row):
+    """Coloca la imagen sobre el recuadro YA DEFINIDO en la plantilla, anclada celda-a-celda
+    (TwoCellAnchor) desde (from_col,from_row) hasta (to_col,to_row) — coords 0-indexed del ancla.
+    Es Excel quien encaja la imagen exactamente dentro del recuadro: NO se calculan píxeles, NO se
+    desborda y NO se altera ninguna fila, columna, celda combinada ni el formato de la plantilla."""
     if isinstance(img_data, str):
         if ',' in img_data: img_data = img_data.split(',')[1]
         img_bytes = base64.b64decode(img_data)
@@ -116,41 +122,6 @@ def _insert_image(ws, img_data, from_col, from_row, to_col, to_row):
     )
     ws.add_image(img)
 
-def _col_width_px(ws, letter):
-    w = ws.column_dimensions[letter].width or 8.43
-    return int(round(w * 7 + 5))
-
-def _cols_px(ws, c1, c2):
-    return sum(_col_width_px(ws, get_column_letter(i))
-               for i in range(column_index_from_string(c1), column_index_from_string(c2) + 1))
-
-def _insert_image_fit(ws, img_data, from_col, from_row, box_w_px, box_h_px, quality=95):
-    """Inserta una imagen CENTRADA dentro de un recuadro (box_w_px × box_h_px), a partir de la
-    celda 0-indexed (from_col, from_row), PRESERVANDO la proporción original (sin deformar).
-    Mantiene alta calidad (JPEG q=95)."""
-    if isinstance(img_data, str):
-        if ',' in img_data: img_data = img_data.split(',')[1]
-        img_bytes = base64.b64decode(img_data)
-    else:
-        img_bytes = img_data
-    pil = PILImage.open(io.BytesIO(img_bytes)).convert('RGB')
-    w, h = pil.size
-    buf = io.BytesIO()
-    pil.save(buf, format='JPEG', quality=quality)
-    buf.seek(0)
-    img = XLImage(buf)
-    scale = min(box_w_px / w, box_h_px / h)            # mismo factor en ambos ejes = sin deformar
-    new_w = max(1, int(w * scale))
-    new_h = max(1, int(h * scale))
-    off_x = int((box_w_px - new_w) / 2)                # centrado horizontal
-    off_y = int((box_h_px - new_h) / 2)                # centrado vertical
-    img.anchor = OneCellAnchor(
-        _from=AnchorMarker(col=from_col, colOff=pixels_to_EMU(off_x),
-                           row=from_row, rowOff=pixels_to_EMU(off_y)),
-        ext=XDRPositiveSize2D(pixels_to_EMU(new_w), pixels_to_EMU(new_h))
-    )
-    ws.add_image(img)
-
 def build_fsgi249(rec, photos):
     wb = load_workbook(TEMPLATE)
     ws = wb.active
@@ -163,19 +134,6 @@ def build_fsgi249(rec, photos):
     ws['U2'].value = 'FSGI-249'
     ws['U3'].value = f"Revisión: 3  ·  {rec.get('codigo','')}"
     ws['U4'].value = f"Fecha: {rec.get('fecha','')}"
-
-    # ── FOTO GENERAL — imagen principal del componente, al INICIO del documento:
-    #    debajo del encabezado (filas 1-4) y antes de los datos del componente (fila 7+).
-    #    Se usa la zona libre de las filas 5-6 (NO se insertan filas, así no se desplazan
-    #    las referencias de celda existentes). Imagen centrada y sin deformar.
-    if photos.get('foto_general'):
-        ws['B5'].value = 'FOTO GENERAL'
-        ws['B5'].font = Font(bold=True, size=11)
-        ws.row_dimensions[5].height = 18      # fila etiqueta
-        ws.row_dimensions[6].height = 225     # fila imagen (~300 px)
-        box_w = _cols_px(ws, 'C', 'T')        # ancho disponible C..T
-        box_h = int(round(225 * 96 / 72))     # alto fila 6 en px
-        _insert_image_fit(ws, photos['foto_general'], 2, 5, box_w, box_h)  # col C(2), fila 6(idx5)
 
     w('D7',  rec.get('cliente',''))
     w('Q7',  f"{rec.get('fecha','')}  {rec.get('hora','')}")
@@ -217,7 +175,7 @@ def build_fsgi249(rec, photos):
         ws['C24'].value = base24
 
     if photos.get('guia_recepcion'):
-        _insert_image(ws, photos['guia_recepcion'], 1, 26, 21, 52)
+        _insert_image(ws, photos['guia_recepcion'], 1, 26, 21, 52)  # recuadro "FOTOGRAFIA DE GUIA Y/O FACTURA"
     else:
         lineas = [f"Transportista: {rec.get('transp','—')}     Bultos: {rec.get('bultos','1')}     Código: {rec.get('codigo','')}"]
         if rec.get('acc'):      lineas.append(f"Accesorios: {rec['acc']}")
